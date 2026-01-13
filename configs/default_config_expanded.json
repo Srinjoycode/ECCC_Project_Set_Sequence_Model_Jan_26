@@ -1,0 +1,51 @@
+{
+  "camels_spat_root": "/media/sbhuiya/1a899d3a-b2a4-487c-b59c-fd2cac4442c8/CAMELS-SPAT",
+  "basin_list_path": "readmes/camels_pretraining_basin_list.txt",
+  "roi_data_path": "FinalData/Dataset4.csv",
+
+  "latent_dim": 128,
+  "lstm_units": 128,
+  "lstm_layers": 2,
+  "seq_length": 12,
+  "predict_ahead": 1,
+  "dropout_rate": 0.23,
+
+  "batch_size": 512,
+  "epochs_ae": 400,
+  "epochs_pretrain": 400,
+  "epochs_finetune": 450,
+  "learning_rate_ae": 0.0005,
+  "learning_rate_pretrain": 0.0005,
+  "learning_rate_finetune": 0.0005,
+  "test_split_fraction": 0.23,
+
+  "seasonal_months": [5, 6, 7, 8, 9],
+  "month_encoding": "sinusoidal",
+  "month_emb_dim": 12,
+  "include_flow_history": true,
+
+  "loss_function_ae": "mse",
+  "loss_function_pretrain": "nse",
+  "loss_function_finetune": "kge",
+
+
+
+  "nse_epsilon": 1e-06,
+  "combined_loss_alpha": 0.5,
+
+  "pretrain_output_dir": "ALL_BASIN_RESULTS_SEQ_FIXED_nsepretrain_KGEfinetune/",
+  "finetune_output_dir": "ALL_BASIN_RESULTS_SEQ_FIXED_nsepretrain_KGEfinetune/",
+
+  "pipeline_version": "v3",
+  "eval_filtered": true,
+  "seed": 42,
+
+  "multistage_schedule": {
+    "1": {"epochs": 150, "lr_factor": 1.0},
+    "2": {"epochs": 150, "lr_factor": 0.8},
+    "3": {"epochs": 150, "lr_factor": 0.7},
+    "4": {"epochs": 150, "lr_factor": 0.5},
+    "5": {"epochs": 150, "lr_factor": 0.4}
+  }
+}
+
