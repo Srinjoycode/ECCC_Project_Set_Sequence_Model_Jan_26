@@ -31,12 +31,12 @@ class Config:
         self.TEST_SPLIT_FRACTION = 0.23
 
         # Patience settings
-        self.PATIENCE_PRETRAIN = 10
+        self.PATIENCE_PRETRAIN = 50
         self.PATIENCE_FINETUNE = 15
         
         # LR Scheduler settings
         self.LR_FACTOR = 0.5
-        self.LR_PATIENCE = 5
+        self.LR_PATIENCE = 15
 
         # Features & Filtering
         self.SEASONAL_MONTHS = [5, 6, 7, 8, 9]

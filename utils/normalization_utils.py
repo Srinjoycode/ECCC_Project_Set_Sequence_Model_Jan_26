@@ -47,6 +47,52 @@ class StandardScalerNP:
         return x * self.std_ + self.mean_
 
 
+class RobustScalerNP:
+    """
+    Robust Scaler using Median and Interquartile Range (IQR).
+    Robust to outliers.
+    """
+
+    def __init__(self, eps: float = DEFAULT_EPS, quantile_range=(25.0, 75.0)):
+        self.eps = float(eps)
+        self.center_ = None
+        self.scale_ = None
+        self.quantile_range = quantile_range
+
+    def fit(self, x: np.ndarray):
+        x = np.asarray(x)
+        if x.size == 0:
+            raise ValueError("Cannot fit scaler on empty array")
+
+        # Collapse all non-feature axes.
+        n_features = x.shape[-1] if x.ndim >= 1 else 1
+        x2 = x.reshape(-1, n_features)
+
+        q_min, q_max = self.quantile_range
+        self.center_ = np.nanmedian(x2, axis=0)
+        
+        q25 = np.nanpercentile(x2, q_min, axis=0)
+        q75 = np.nanpercentile(x2, q_max, axis=0)
+        
+        self.scale_ = q75 - q25
+        # Avoid division by zero
+        self.scale_ = np.where(self.scale_ < self.eps, 1.0, self.scale_)
+        
+        return self
+
+    def transform(self, x: np.ndarray) -> np.ndarray:
+        if self.center_ is None or self.scale_ is None:
+            raise ValueError("Scaler has not been fit")
+        x = np.asarray(x)
+        return (x - self.center_) / self.scale_
+
+    def inverse_transform(self, x: np.ndarray) -> np.ndarray:
+        if self.center_ is None or self.scale_ is None:
+            raise ValueError("Scaler has not been fit")
+        x = np.asarray(x)
+        return x * self.scale_ + self.center_
+
+
 def fit_feature_scaler_from_basin_list(X_train_list):
     """Fit a StandardScalerNP on a list of basin tensors.
 
@@ -67,4 +113,3 @@ def fit_feature_scaler_from_basin_list(X_train_list):
 
     agg = np.concatenate(chunks, axis=0)
     return StandardScalerNP().fit(agg)
-

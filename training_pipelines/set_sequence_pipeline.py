@@ -2,14 +2,14 @@ import os
 import numpy as np
 from datetime import datetime
 import tensorflow as tf
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint, LearningRateScheduler
 from utils.memory_utils import print_memory_status, clear_memory
 from utils.set_seq_data_loading import load_all_pretrain_basins, process_roi_csv
 from utils.set_sequence_data_processing import create_sequences
 from models.set_sequence import build_set_sequence_model
 from visualisation import plot_training_history, plot_predictions
 from utils.metrics_utils import compute_basin_metrics
-from utils.normalization_utils import StandardScalerNP, fit_feature_scaler_from_basin_list
+from utils.normalization_utils import StandardScalerNP, RobustScalerNP, fit_feature_scaler_from_basin_list
 
 DEFAULT_DTYPE = np.float32
 
@@ -51,7 +51,10 @@ class NSELoss(tf.keras.losses.Loss):
 
 
 class BasinSequenceGenerator(tf.keras.utils.Sequence):
-    """Custom generator; within a batch, grid size is constant (per basin)."""
+    """
+    Custom generator that yields batches of sequences from a single basin at a time.
+    Implements a shuffled queue to ensure all basins are visited evenly.
+    """
 
     def __init__(self, X_list, y_list, batch_size, seq_length, steps_per_epoch=100, predict_ahead=1):
         super().__init__()
@@ -62,21 +65,38 @@ class BasinSequenceGenerator(tf.keras.utils.Sequence):
         self.steps_per_epoch = steps_per_epoch
         self.predict_ahead = int(predict_ahead)
         self.n_basins = len(X_list)
+        
+        # Initialize basin queue
+        self.basin_queue = []
+        self._refill_queue()
+
+    def _refill_queue(self):
+        """Refills and shuffles the basin index queue."""
+        indices = np.arange(self.n_basins)
+        np.random.shuffle(indices)
+        self.basin_queue = list(indices)
 
     def __len__(self):
         return self.steps_per_epoch
 
     def __getitem__(self, index):
-        basin_idx = np.random.randint(0, self.n_basins)
+        # Get next basin from queue
+        if not self.basin_queue:
+            self._refill_queue()
+        
+        basin_idx = self.basin_queue.pop(0)
+        
         X_basin = self.X_list[basin_idx]
         y_basin = self.y_list[basin_idx]
 
         # Need enough room for seq_length + predict_ahead target
         max_start = len(X_basin) - (self.seq_length + self.predict_ahead)
+        
+        # If basin is too short, skip it and try next one (recursive call)
         if max_start <= 0:
-            # If the basin is too short for even one sequence, try another basin
-            return self.__getitem__(np.random.randint(0, self.n_basins))
+            return self.__getitem__(index)
 
+        # Sample random start indices within this basin
         start_indices = np.random.randint(0, max_start + 1, self.batch_size)
 
         batch_X, batch_y = [], []
@@ -165,7 +185,8 @@ def pipeline_set_sequence(config, basin_list, args):
     # CRITICAL CHANGE: We normalize flow *per basin* to N(0,1).
     # This prevents large rivers from dominating the gradient and allows the model 
     # to learn the *shape* of the hydrograph response function universally.
-    print("Applying Per-Basin Target Scaling (y)...")
+    # UPDATED: Using RobustScalerNP to handle outliers better.
+    print("Applying Per-Basin Target Scaling (y) - RobustScaler...")
     
     y_train_list_norm = []
     y_val_list_norm = []
@@ -174,7 +195,7 @@ def pipeline_set_sequence(config, basin_list, args):
     # for specific pretraining basins (we only care about the weights for the ROI later).
     for i, (yb_train, yb_val) in enumerate(zip(y_train_list, y_val_list)):
         # Fit on training portion only
-        local_scaler = StandardScalerNP().fit(yb_train.reshape(-1, 1))
+        local_scaler = RobustScalerNP().fit(yb_train.reshape(-1, 1))
         
         # Transform both train and val
         y_train_norm = local_scaler.transform(yb_train).astype(DEFAULT_DTYPE)
@@ -258,12 +279,26 @@ def pipeline_set_sequence(config, basin_list, args):
 
     # Use MSE loss for pretraining on locally normalized targets.
     # Since targets are ~N(0,1), MSE is stable and effectively optimizes correlation/Nash-Sutcliffe.
+    # ADDED: clipnorm=1.0 to stabilize gradients
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate=config.LEARNING_RATE_PRETRAIN,
+        clipnorm=1.0
+    )
+    
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE_PRETRAIN),
+        optimizer=optimizer,
         loss='mse', 
         metrics=['mae', 'mse']
     )
     model.summary()
+
+    # --- LEARNING RATE WARMUP ---
+    def warmup_scheduler(epoch, lr):
+        warmup_epochs = 5
+        base_lr = config.LEARNING_RATE_PRETRAIN
+        if epoch < warmup_epochs:
+            return base_lr * (epoch + 1) / warmup_epochs
+        return lr # Handled by ReduceLROnPlateau after warmup
 
     print("\n--- Starting Pretraining ---")
     
@@ -276,6 +311,7 @@ def pipeline_set_sequence(config, basin_list, args):
         callbacks=[
             EarlyStopping(monitor='val_loss', patience=getattr(config, 'PATIENCE_PRETRAIN', 10), restore_best_weights=True),
             ReduceLROnPlateau(monitor='val_loss', factor=getattr(config, 'LR_FACTOR', 0.5), patience=getattr(config, 'LR_PATIENCE', 5)),
+            LearningRateScheduler(warmup_scheduler),
             ModelCheckpoint(os.path.join(output_dir, 'best_set_seq_pretrain.keras'), save_best_only=True)
         ]
     )
@@ -341,7 +377,8 @@ def pipeline_set_sequence(config, basin_list, args):
 
     # Target (y) is still locally normalized (Per-Basin / Per-ROI)
     # This matches the 'Per-Basin Target Scaling' used in pretraining.
-    y_roi_scaler = StandardScalerNP().fit(y_train_roi.reshape(-1, 1))
+    # UPDATED: Using RobustScalerNP here too for consistency.
+    y_roi_scaler = RobustScalerNP().fit(y_train_roi.reshape(-1, 1))
 
     X_train_roi_n = x_roi_scaler.transform(X_train_roi).astype(DEFAULT_DTYPE)
     X_test_roi_n = x_roi_scaler.transform(X_test_roi).astype(DEFAULT_DTYPE)
@@ -352,8 +389,14 @@ def pipeline_set_sequence(config, basin_list, args):
     print(f"ROI Test shape: {X_test_roi.shape}")
 
     # Compile for fine-tuning (lower LR)
+    # ADDED: clipnorm=1.0 for fine-tuning as well
+    optimizer_ft = tf.keras.optimizers.Adam(
+        learning_rate=config.LEARNING_RATE_FINETUNE,
+        clipnorm=1.0
+    )
+    
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE_FINETUNE),
+        optimizer=optimizer_ft,
         #loss=NSELoss(),
         loss='mse',
         metrics=['mae']
