@@ -102,12 +102,20 @@ def pipeline_set_sequence(config, basin_list, args):
     # STEP 1: LOAD PRETRAINING DATA (3D STACKED)
     # ====================================================
     # Note: flatten_spatial=False gives (Time, Grid, Feat)
-    X_list, _, y_list, successful_basins, _ = load_all_pretrain_basins(
+    #X_list, M_list, y_list, successful_basins, months_list
+    X_list, pretrain_M_list, y_list, successful_basins, pretrain_months_list = load_all_pretrain_basins(
         basin_list, config.CAMELS_SPAT_ROOT,
         apply_seasonal_filter=False,
         config=config,
         flatten_spatial=False
     )
+
+    print(f"#Dataset of pretraining loaded from {len(successful_basins)}")
+    print(f"X_list shape: {len(X_list)}")
+    print(f"y_list shape: {len(y_list)}")
+    print(f"M_list shape: {len(pretrain_M_list)}")
+    print(f"months_list shape: {len(pretrain_months_list)}")
+
 
     # ====================================================
     # STEP 2: BUILD & PRETRAIN SET-SEQUENCE MODEL
@@ -132,17 +140,43 @@ def pipeline_set_sequence(config, basin_list, args):
     # ------------------------------
     # NORMALIZATION (PRETRAIN)
     # ------------------------------
-    # Fit scalers on TRAIN only; apply to train/val.
-    # X scaler is per-feature computed across all train basins/time/grid.
+    # 1. Feature Normalization (X)
+    # Applied globally (across all basins) to preserve relative climatology signals (e.g. Arid vs Wet basins)
+    print("Fitting Global Feature Scaler (X)...")
     x_scaler = fit_feature_scaler_from_basin_list(X_train_list)
-
-    # y scaler is a single-dim standard scaler fit across all train basins.
-    y_scaler = StandardScalerNP().fit(np.concatenate([yb.reshape(-1, 1) for yb in y_train_list], axis=0))
 
     X_train_list = [x_scaler.transform(Xb).astype(DEFAULT_DTYPE) for Xb in X_train_list]
     X_val_list = [x_scaler.transform(Xb).astype(DEFAULT_DTYPE) for Xb in X_val_list]
-    y_train_list = [y_scaler.transform(yb).astype(DEFAULT_DTYPE) for yb in y_train_list]
-    y_val_list = [y_scaler.transform(yb).astype(DEFAULT_DTYPE) for yb in y_val_list]
+    
+    # 2. Target Normalization (y) - PER BASIN
+    # CRITICAL CHANGE: We normalize flow *per basin* to N(0,1).
+    # This prevents large rivers from dominating the gradient and allows the model 
+    # to learn the *shape* of the hydrograph response function universally.
+    print("Applying Per-Basin Target Scaling (y)...")
+    
+    y_train_list_norm = []
+    y_val_list_norm = []
+    
+    # We don't keep the scalers for pretraining since we don't need to inverse predict 
+    # for specific pretraining basins (we only care about the weights for the ROI later).
+    for i, (yb_train, yb_val) in enumerate(zip(y_train_list, y_val_list)):
+        # Fit on training portion only
+        local_scaler = StandardScalerNP().fit(yb_train.reshape(-1, 1))
+        
+        # Transform both train and val
+        y_train_norm = local_scaler.transform(yb_train).astype(DEFAULT_DTYPE)
+        y_val_norm = local_scaler.transform(yb_val).astype(DEFAULT_DTYPE)
+        
+        y_train_list_norm.append(y_train_norm)
+        y_val_list_norm.append(y_val_norm)
+        
+    # Replace the lists with normalized versions
+    y_train_list = y_train_list_norm
+    y_val_list = y_val_list_norm
+
+    print("\n--- Pretraining Data Shapes per Basin (Train Split) ---")
+    for i, (Xb, yb) in enumerate(zip(X_train_list, y_train_list)):
+         print(f"Basin {i}: X shape={Xb.shape}, y shape={yb.shape}")
 
     # Create Generators
     train_gen = BasinSequenceGenerator(
@@ -170,11 +204,12 @@ def pipeline_set_sequence(config, basin_list, args):
         dropout_rate=config.DROPOUT_RATE
     )
 
+    # Use MSE loss for pretraining on locally normalized targets.
+    # Since targets are ~N(0,1), MSE is stable and effectively optimizes correlation/Nash-Sutcliffe.
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE_PRETRAIN),
-        #loss=NSELoss(),
-        loss='msle',
-        metrics=['mae']
+        loss='mse', 
+        metrics=['mae', 'mse']
     )
     model.summary()
 
@@ -230,8 +265,20 @@ def pipeline_set_sequence(config, basin_list, args):
     # ------------------------------
     # NORMALIZATION (ROI)
     # ------------------------------
-    # For ROI we fit scalers on ROI-train only. This keeps evaluation honest.
-    x_roi_scaler = StandardScalerNP().fit(X_train_roi.reshape(-1, X_train_roi.shape[-1]))
+    # CONSISTENCY FIX: Use the SAME x_scaler from pretraining for the ROI inputs.
+    # This ensures the model sees features in the same global distribution space.
+    # We do NOT refit X scaler on the ROI.
+    print("Applying Pretraining Global Scaler to ROI inputs...")
+
+    # Check if x_scaler exists (it should from the pretraining block above)
+    if 'x_scaler' not in locals():
+        print("WARNING: x_scaler not found. Fitting local scaler (suboptimal for consistency).")
+        x_roi_scaler = StandardScalerNP().fit(X_train_roi.reshape(-1, X_train_roi.shape[-1]))
+    else:
+        x_roi_scaler = x_scaler
+
+    # Target (y) is still locally normalized (Per-Basin / Per-ROI)
+    # This matches the 'Per-Basin Target Scaling' used in pretraining.
     y_roi_scaler = StandardScalerNP().fit(y_train_roi.reshape(-1, 1))
 
     X_train_roi_n = x_roi_scaler.transform(X_train_roi).astype(DEFAULT_DTYPE)

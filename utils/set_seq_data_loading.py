@@ -66,16 +66,15 @@ def process_netcdf_basin(basin_id, camels_root, apply_seasonal_filter=False, tar
 
         print("Datasets opened")
 
-        potential_vars = ['prcp', 'tmin', 'tmax', 'tavg'] #['prcp', 'tmin', 'tmax', 'tavg', 'swe', 'vp', 'dayl']
-
-        available_vars = [v for v in potential_vars if v in forcing_ds.data_vars]
-
-        if not available_vars:
+        if not forcing_ds.data_vars:
+            print(f"No data variables found in {forcing_path}")
             forcing_ds.close()
             flow_ds.close()
             return None, None, None, None
 
-        print("Available vars found", available_vars)
+        # Standardize features to ensure consistency across basins and with ROI
+        required_vars = ['prcp', 'tmin', 'tmax', 'tavg']
+        # potential_vars = required_vars (redundant, we iterate required_vars)
 
         # Resample to monthly
         monthly_forcing = forcing_ds.resample(time='MS').mean()
@@ -83,8 +82,15 @@ def process_netcdf_basin(basin_id, camels_root, apply_seasonal_filter=False, tar
 
         # --- DATA EXTRACTION ---
         feature_list = []
-        for var in available_vars:
-            data = monthly_forcing[var].values  # Shape: (Time, Lat, Lon)
+        for var in required_vars:
+            if var in monthly_forcing.data_vars:
+                data = monthly_forcing[var].values  # Shape: (Time, Lat, Lon)
+            else:
+                # Fill zeros if missing
+                # Use ANY present variable to determine shape
+                ref_var = list(forcing_ds.data_vars)[0]
+                data = np.zeros_like(monthly_forcing[ref_var].values)
+
             data = np.nan_to_num(data, nan=0.0)
 
             # Reshape spatial dims (Lat, Lon) -> (Grid_Points)
@@ -179,149 +185,75 @@ def load_all_pretrain_basins(basin_list, camels_root, apply_seasonal_filter=Fals
         raise ValueError("No valid basins were loaded!")
 
     # Check shape of first loaded basin
-    print(f"Sample basin shape: {X_list[0].shape}")
+    if len(X_list) > 0:
+        print(f"Sample basin shape: {X_list[0].shape}")
 
     return X_list, M_list, y_list, successful_basins, months_list
 
 
-# def process_roi_csv(csv_path, apply_seasonal_filter=False, target_months=None, config=None, flatten_spatial=True):
-#     """
-#     MODIFIED: Handles ROI CSVs.
-#     If flatten_spatial=False, reshapes X_meteo to (Time, 1, Features) to act as a "Set of size 1".
-#     """
-#     print(f"\nProcessing ROI dataset: {csv_path}")
-#     df = pd.read_csv(csv_path)
-#
-#     if apply_seasonal_filter and target_months is not None and 'Month' in df.columns:
-#         mask = df['Month'].isin(target_months)
-#         df = df[mask].reset_index(drop=True)
-#
-#     meteo_keywords = ['precip', 'temp', 'SD_', 'SW_']
-#     meteo_cols = [c for c in df.columns if any(k in c for k in meteo_keywords)]
-#     exclude = ['Flow', 'Year', 'YM', 'Month', 'Unnamed: 0'] + meteo_cols
-#     global_cols = [c for c in df.columns if c not in exclude]
-#
-#     # Month handling (same as original)
-#     if 'Month' in df.columns:
-#         months = df['Month'].values
-#         if config is not None and getattr(config, 'MONTH_ENCODING', 'dummy') == 'sinusoidal':
-#             emb_dim = getattr(config, 'MONTH_EMB_DIM', 12)
-#             month_dummies = month_sinusoidal_embedding(months, dim=emb_dim, period=12).astype(DEFAULT_DTYPE)
-#         else:
-#             month_dummies = pd.get_dummies(df['Month'], prefix='Month').reindex(
-#                 columns=[f'Month_{i}' for i in range(1, 13)], fill_value=0
-#             ).values.astype(DEFAULT_DTYPE)
-#     else:
-#         month_dummies = np.zeros((len(df), 12), dtype=DEFAULT_DTYPE)
-#         months = np.zeros(len(df))
-#
-#     X_meteo = df[meteo_cols].values.astype(DEFAULT_DTYPE)
-#
-#     if not flatten_spatial:
-#         # Reshape to (Time, 1, Features) for Set-Sequence model
-#         X_meteo = X_meteo[:, np.newaxis, :]
-#
-#     X_global_indices = df[global_cols].values.astype(DEFAULT_DTYPE) if global_cols else np.zeros((len(df), 1),
-#                                                                                                  dtype=DEFAULT_DTYPE)
-#     X_global = np.hstack([month_dummies, X_global_indices])
-#     y_flow = df['Flow'].values.reshape(-1, 1).astype(DEFAULT_DTYPE)
-#
-#     print(f" ROI features - Meteo: {X_meteo.shape}, Global: {X_global.shape}, Flow: {y_flow.shape}")
-#     return X_meteo, X_global, y_flow, months
-#
-
 def process_roi_csv(csv_path, apply_seasonal_filter=False, target_months=None, config=None, flatten_spatial=True):
+    """
+    MODIFIED: Handles ROI CSVs.
+    Parses columns to extract stations and creates a spatial 'Set' structure.
+    Returns X as (Time, Grid, 4) where 4 = [prcp, tmin, tmax, tavg].
+    """
     print(f"\nProcessing ROI dataset: {csv_path}")
     df = pd.read_csv(csv_path)
 
-    # 1. Seasonal Filtering
     if apply_seasonal_filter and target_months is not None and 'Month' in df.columns:
         mask = df['Month'].isin(target_months)
         df = df[mask].reset_index(drop=True)
 
-    # 2. Define the stations and variables to extract
-    # Based on your CSV header: Banff, Lake Louise, Calgary Intl A
-    stations = ['Lake Louise', 'Calgary Intl A', 'Banff',"Elbow Ranger Station"]
-
-    # Map model features (generic) to CSV columns (specific)
-    # The order MUST match 'potential_vars' in process_netcdf_basin: ['prcp', 'tmin', 'tmax', 'tavg']
+    # 1. Identify Stations and their columns
+    # Heuristic: <StationName>_<VariableSuffix>
+    # We look for columns ending in the known suffixes for the 4 required vars.
     var_map = {
         'prcp': '_precip',
         'tmin': '_min_temp',
         'tmax': '_max_temp',
         'tavg': '_avetemp_avg_temp'
     }
+    
+    # Find all potential stations
+    all_cols = df.columns.tolist()
+    stations = set()
+    for col in all_cols:
+        for var, suffix in var_map.items():
+            if col.endswith(suffix):
+                stations.add(col[:-len(suffix)])
+    
+    stations = sorted(list(stations))
+    print(f"Identified {len(stations)} stations in ROI: {stations}")
+    
+    if not stations:
+        raise ValueError("No stations identified in ROI CSV! Check column suffixes.")
 
-    # 3. Build the 3D Set Tensor: (Time, Stations, Variables)
-    X_set_list = []
-
-    for station in stations:
-        station_feats = []
-        is_station_valid = True
-
-        for model_var, csv_suffix in var_map.items():
-            col_name = f"{station}{csv_suffix}"
-
+    # 2. Build 3D Tensor (Time, Stations, 4)
+    n_time = len(df)
+    n_stations = len(stations)
+    n_features = 4  # Fixed to [prcp, tmin, tmax, tavg]
+    
+    X_spatial = np.zeros((n_time, n_stations, n_features), dtype=np.float32)
+    
+    for i, station in enumerate(stations):
+        for j, var_key in enumerate(['prcp', 'tmin', 'tmax', 'tavg']):
+            suffix = var_map[var_key]
+            col_name = f"{station}{suffix}"
             if col_name in df.columns:
-                station_feats.append(df[col_name].values)
-            else:
-                # Handle missing data (e.g., Banff might lack temp)
-                # For Set-Sequence, we can fill with 0 or skip the station.
-                # Here we fill with 0 to keep the station in the set.
-                # print(f"Warning: {col_name} missing. Filling 0.")
-                station_feats.append(np.zeros(len(df)))
-
-                # If you prefer to drop stations with missing data, uncomment below:
-                # is_station_valid = False
-                # break
-
-        if is_station_valid:
-            # Stack variables for this station -> (Time, N_Vars)
-            station_data = np.stack(station_feats, axis=-1)
-            X_set_list.append(station_data)
-
-    # Stack stations -> (Time, N_Stations, N_Vars)
-    # Result shape: (Time, 3, 4)
-    X_meteo = np.stack(X_set_list, axis=1).astype(DEFAULT_DTYPE)
+                X_spatial[:, i, j] = df[col_name].values
 
     if flatten_spatial:
-        # Fallback for old pipelines (Time, N_Stations * N_Vars)
-        X_meteo = X_meteo.reshape(X_meteo.shape[0], -1)
-
-    # 4. Global Features (Indices) & Month
-    # Exclude the station columns we just processed plus meta columns
-    used_cols = [f"{s}{v}" for s in stations for v in var_map.values()]
-    meta_cols = ['Year', 'Month', 'YM', 'Flow', 'Unnamed: 0']
-    exclude = used_cols + meta_cols
-
-    global_cols = [c for c in df.columns if c not in exclude and c in df.columns]
-
-    # Month dummies
-    if 'Month' in df.columns:
-        months = df['Month'].values
-        if config is not None and getattr(config, 'MONTH_ENCODING', 'dummy') == 'sinusoidal':
-            emb_dim = getattr(config, 'MONTH_EMB_DIM', 12)
-            month_dummies = month_sinusoidal_embedding(months, dim=emb_dim, period=12).astype(DEFAULT_DTYPE)
-        else:
-            month_dummies = pd.get_dummies(df['Month'], prefix='Month').reindex(
-                columns=[f'Month_{i}' for i in range(1, 13)], fill_value=0
-            ).values.astype(DEFAULT_DTYPE)
+        X_processed = X_spatial.reshape(n_time, -1)
     else:
-        month_dummies = np.zeros((len(df), 12), dtype=DEFAULT_DTYPE)
-        months = np.zeros(len(df))
+        X_processed = X_spatial
 
-    X_global_indices = df[global_cols].values.astype(DEFAULT_DTYPE) if global_cols else np.zeros((len(df), 1),
-                                                                                                 dtype=DEFAULT_DTYPE)
-    X_global = np.hstack([month_dummies, X_global_indices])
+    # 3. Targets and Others
+    y_flow = df['Flow'].values.reshape(-1, 1).astype(np.float32) if 'Flow' in df.columns else np.zeros((n_time, 1), dtype=np.float32)
+    roi_months = df['Month'].values if 'Month' in df.columns else None
+    X_global = None 
 
-    y_flow = df['Flow'].values.reshape(-1, 1).astype(DEFAULT_DTYPE)
-
-    print(f" ROI processed. Shape: {X_meteo.shape} (Time, Stations, Vars)")
-    print(f" Stations processed: {stations}")
-
-    return X_meteo, X_global, y_flow, months
-
-
+    print(f"ROI Processed Shape: {X_processed.shape}")
+    return X_processed, X_global, y_flow, roi_months
 
 
 def temporal_train_test_split(X, y, test_fraction, gap_fraction=0.0, months=None):

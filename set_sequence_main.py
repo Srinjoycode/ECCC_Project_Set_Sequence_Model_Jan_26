@@ -13,7 +13,7 @@ from utils.set_seq_data_loading import load_basin_list
 def main():
     parser = argparse.ArgumentParser(description="Run Hydrological Deep Learning Pipelines")
     parser.add_argument('--config', type=str, default='configs/default_config.json', help='Path to config JSON')
-    parser.add_argument('--pipeline', type=str, choices=['v1', 'v2', 'v3', 'set_seq'], required=True,
+    parser.add_argument('--pipeline', type=str, choices=['set_seq'], required=True,
                         help='Pipeline version to run')
     parser.add_argument('--eval-filtered', action='store_true', help='Evaluate on seasonal months only')
     parser.add_argument('--gpu', type=int, default=0, help='GPU index to use')
