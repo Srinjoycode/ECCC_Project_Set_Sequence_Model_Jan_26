@@ -74,7 +74,8 @@ class BasinSequenceGenerator(tf.keras.utils.Sequence):
         # Need enough room for seq_length + predict_ahead target
         max_start = len(X_basin) - (self.seq_length + self.predict_ahead)
         if max_start <= 0:
-            return self.__getitem__(index)
+            # If the basin is too short for even one sequence, try another basin
+            return self.__getitem__(np.random.randint(0, self.n_basins))
 
         start_indices = np.random.randint(0, max_start + 1, self.batch_size)
 
@@ -98,6 +99,17 @@ def pipeline_set_sequence(config, basin_list, args):
     output_dir = os.path.join(config.PRETRAIN_OUTPUT_DIR, f"set_seq_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
 
+    # Determine filtering flags based on FILTERING_MODE
+    mode = config.FILTERING_MODE
+    filter_pretrain = (mode == 'all')
+    filter_finetune = (mode in ['finetune', 'all'])
+    filter_eval = (mode in ['eval_only', 'finetune', 'all'])
+
+    print(f"Filtering Mode: {mode}")
+    print(f"  - Filter Pretrain Data: {filter_pretrain}")
+    print(f"  - Filter Finetune Data: {filter_finetune}")
+    print(f"  - Filter Evaluation:    {filter_eval}")
+
     # ====================================================
     # STEP 1: LOAD PRETRAINING DATA (3D STACKED)
     # ====================================================
@@ -105,7 +117,8 @@ def pipeline_set_sequence(config, basin_list, args):
     #X_list, M_list, y_list, successful_basins, months_list
     X_list, pretrain_M_list, y_list, successful_basins, pretrain_months_list = load_all_pretrain_basins(
         basin_list, config.CAMELS_SPAT_ROOT,
-        apply_seasonal_filter=False,
+        apply_seasonal_filter=filter_pretrain,
+        target_months=config.SEASONAL_MONTHS,
         config=config,
         flatten_spatial=False
     )
@@ -174,25 +187,64 @@ def pipeline_set_sequence(config, basin_list, args):
     y_train_list = y_train_list_norm
     y_val_list = y_val_list_norm
 
-    print("\n--- Pretraining Data Shapes per Basin (Train Split) ---")
+    # --- DYNAMIC STEPS CALCULATION ---
+    total_train_sequences = sum([max(0, len(X) - config.SEQ_LENGTH - config.PREDICT_AHEAD) for X in X_train_list])
+    total_val_sequences = sum([max(0, len(X) - config.SEQ_LENGTH - config.PREDICT_AHEAD) for X in X_val_list])
+    
+    # Heuristic: Cover the dataset roughly once per epoch
+    # Ensure at least 1 step
+    steps_per_epoch = max(1, total_train_sequences // config.BATCH_SIZE)
+    val_steps = max(1, total_val_sequences // config.BATCH_SIZE)
+
+    print("\n--- Pretraining Data Stats ---")
+    print(f"Total Train Sequences Available: {total_train_sequences}")
+    print(f"Total Val Sequences Available:   {total_val_sequences}")
+    print(f"Calculated Steps Per Epoch:      {steps_per_epoch} (Batch Size: {config.BATCH_SIZE})")
+    print(f"Calculated Val Steps:            {val_steps}")
+
     for i, (Xb, yb) in enumerate(zip(X_train_list, y_train_list)):
          print(f"Basin {i}: X shape={Xb.shape}, y shape={yb.shape}")
-
+         print("temporal length:", Xb.shape[0])
+    
     # Create Generators
-    train_gen = BasinSequenceGenerator(
+    # WRAPPER FIX: We must wrap the generator in a tf.data.Dataset to allow dynamic shapes.
+    # Keras Sequence enforces static shapes based on the first batch, which crashes with variable grid sizes.
+    
+    def generator_wrapper(gen):
+        for i in range(len(gen)):
+            yield gen[i]
+
+    # Define output signature with None for grid dimension
+    output_signature = (
+        tf.TensorSpec(shape=(None, config.SEQ_LENGTH, None, n_features), dtype=tf.float32),
+        tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
+    )
+
+    train_gen_base = BasinSequenceGenerator(
         X_train_list, y_train_list,
         batch_size=config.BATCH_SIZE,
         seq_length=config.SEQ_LENGTH,
-        steps_per_epoch=getattr(config, 'STEPS_PER_EPOCH', 100),
+        steps_per_epoch=steps_per_epoch,
         predict_ahead=getattr(config, 'PREDICT_AHEAD', 1)
     )
-    val_gen = BasinSequenceGenerator(
+    
+    val_gen_base = BasinSequenceGenerator(
         X_val_list, y_val_list,
         batch_size=config.BATCH_SIZE,
         seq_length=config.SEQ_LENGTH,
-        steps_per_epoch=getattr(config, 'VAL_STEPS', 20),
+        steps_per_epoch=val_steps,
         predict_ahead=getattr(config, 'PREDICT_AHEAD', 1)
     )
+
+    train_dataset = tf.data.Dataset.from_generator(
+        lambda: generator_wrapper(train_gen_base),
+        output_signature=output_signature
+    ).repeat().prefetch(tf.data.AUTOTUNE)
+
+    val_dataset = tf.data.Dataset.from_generator(
+        lambda: generator_wrapper(val_gen_base),
+        output_signature=output_signature
+    ).repeat().prefetch(tf.data.AUTOTUNE)
 
     print(f"\nBuilding Set-Sequence Model...")
     model = build_set_sequence_model(
@@ -214,20 +266,23 @@ def pipeline_set_sequence(config, basin_list, args):
     model.summary()
 
     print("\n--- Starting Pretraining ---")
+    
     history = model.fit(
-        train_gen,
-        validation_data=val_gen,
+        train_dataset,
+        validation_data=val_dataset,
         epochs=config.EPOCHS_PRETRAIN,
+        steps_per_epoch=steps_per_epoch,
+        validation_steps=val_steps,
         callbacks=[
-            EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
-            ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5),
+            EarlyStopping(monitor='val_loss', patience=getattr(config, 'PATIENCE_PRETRAIN', 10), restore_best_weights=True),
+            ReduceLROnPlateau(monitor='val_loss', factor=getattr(config, 'LR_FACTOR', 0.5), patience=getattr(config, 'LR_PATIENCE', 5)),
             ModelCheckpoint(os.path.join(output_dir, 'best_set_seq_pretrain.keras'), save_best_only=True)
         ]
     )
     plot_training_history(history, "Set_Seq_Pretrain", output_dir)
 
     # Clean up pretraining data
-    del X_list, y_list, X_train_list, X_val_list, train_gen, val_gen
+    del X_list, y_list, X_train_list, X_val_list, train_gen_base, val_gen_base, train_dataset, val_dataset
     clear_memory(verbose=True)
 
     # ====================================================
@@ -240,6 +295,8 @@ def pipeline_set_sequence(config, basin_list, args):
     # Load ROI data (flatten_spatial=False -> Grid=1)
     X_roi, X_global, y_roi, roi_months = process_roi_csv(
         config.ROI_DATA_PATH,
+        apply_seasonal_filter=filter_finetune,
+        target_months=config.SEASONAL_MONTHS,
         config=config,
         flatten_spatial=False
     )
@@ -249,11 +306,13 @@ def pipeline_set_sequence(config, basin_list, args):
     # X_roi is (Time, 1, Feat)
 
 
-    X_roi_seq, y_roi_seq = create_sequences(
+    # MODIFIED: Now returns months sequence as well
+    X_roi_seq, y_roi_seq, roi_months_seq = create_sequences(
         X_roi, X_global, y_roi,
         config.SEQ_LENGTH,
-        config.PREDICT_AHEAD
-    )#x_global is not real for now
+        config.PREDICT_AHEAD,
+        months=roi_months
+    )
 
     # Train/Val/Test Split for ROI
     train_size = int(len(X_roi_seq) * (1 - config.TEST_SPLIT_FRACTION))
@@ -261,6 +320,9 @@ def pipeline_set_sequence(config, basin_list, args):
     y_train_roi = y_roi_seq[:train_size]
     X_test_roi = X_roi_seq[train_size:]
     y_test_roi = y_roi_seq[train_size:]
+    
+    # Also split months for evaluation filtering
+    months_test = roi_months_seq[train_size:]
 
     # ------------------------------
     # NORMALIZATION (ROI)
@@ -293,7 +355,7 @@ def pipeline_set_sequence(config, basin_list, args):
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE_FINETUNE),
         #loss=NSELoss(),
-        loss='msle',
+        loss='mse',
         metrics=['mae']
     )
 
@@ -304,6 +366,9 @@ def pipeline_set_sequence(config, basin_list, args):
     print("ROI Test")
     print(f"X_test_roi_n shape: {X_test_roi_n.shape}")
     print(f"y_test_roi_n shape: {y_test_roi_n.shape}")
+    
+    print(f"Fine-tuning: {len(X_train_roi_n)} training samples")
+    print(f"Fine-tuning: {len(X_test_roi_n)} validation/test samples")
 
     history_ft = model.fit(
         X_train_roi_n, y_train_roi_n,
@@ -311,7 +376,8 @@ def pipeline_set_sequence(config, basin_list, args):
         epochs=config.EPOCHS_FINETUNE,
         batch_size=config.BATCH_SIZE,
         callbacks=[
-            EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True),
+            EarlyStopping(monitor='val_loss', patience=getattr(config, 'PATIENCE_FINETUNE', 15), restore_best_weights=True),
+            ReduceLROnPlateau(monitor='val_loss', factor=getattr(config, 'LR_FACTOR', 0.5), patience=getattr(config, 'LR_PATIENCE', 5)),
             ModelCheckpoint(os.path.join(output_dir, 'best_set_seq_finetune.keras'), save_best_only=True)
         ]
     )
@@ -326,15 +392,29 @@ def pipeline_set_sequence(config, basin_list, args):
     y_pred_n = model.predict(X_test_roi_n)
     y_pred = y_roi_scaler.inverse_transform(y_pred_n)
     y_test = y_test_roi  # already raw
+    
+    # APPLY EVALUATION FILTERING IF REQUESTED
+    if filter_eval and config.SEASONAL_MONTHS:
+        print(f"Filtering evaluation to seasonal months: {config.SEASONAL_MONTHS}")
+        # Create mask based on months_test
+        eval_mask = np.isin(months_test, config.SEASONAL_MONTHS)
+        
+        y_test_eval = y_test[eval_mask]
+        y_pred_eval = y_pred[eval_mask]
+        
+        print(f"Filtered evaluation set size: {len(y_test_eval)} / {len(y_test)}")
+    else:
+        y_test_eval = y_test
+        y_pred_eval = y_pred
 
-    metrics = compute_basin_metrics(y_test, y_pred)
+    metrics = compute_basin_metrics(y_test_eval, y_pred_eval)
     print(f"Test Metrics: {metrics}")
 
     plot_predictions(
-        y_test, y_pred,
+        y_test_eval, y_pred_eval,
         "Set_Seq_Predictions",
         output_dir,
-        filter_months=None,
+        filter_months=config.SEASONAL_MONTHS if filter_eval else None,
         target_months_seq=None
     )
 

@@ -12,10 +12,14 @@ from utils.set_seq_data_loading import load_basin_list
 
 def main():
     parser = argparse.ArgumentParser(description="Run Hydrological Deep Learning Pipelines")
-    parser.add_argument('--config', type=str, default='configs/default_config.json', help='Path to config JSON')
+    parser.add_argument('--config', type=str, default=None, help='Path to config JSON')
     parser.add_argument('--pipeline', type=str, choices=['set_seq'], required=True,
                         help='Pipeline version to run')
-    parser.add_argument('--eval-filtered', action='store_true', help='Evaluate on seasonal months only')
+
+    # Replaced boolean flag with string argument for filtering mode
+    parser.add_argument('--filtering-mode', type=str, choices=['none', 'eval_only', 'finetune', 'all'],
+                        default=None, help='Override filtering mode from config')
+
     parser.add_argument('--gpu', type=int, default=0, help='GPU index to use')
 
     args = parser.parse_args()
@@ -33,7 +37,7 @@ def main():
         print("⚠️  No GPU found, running on CPU")
 
     # Load Config
-    config = Config(args.config)
+    config = Config.from_args(args)
     set_global_seed(config.SEED)
 
     # Load Basin List

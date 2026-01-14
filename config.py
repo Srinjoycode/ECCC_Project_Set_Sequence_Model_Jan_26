@@ -8,10 +8,10 @@ class Config:
 
     def __init__(self, config_file=None):
         # Paths
-        self.CAMELS_SPAT_ROOT = "/media/sbhuiya/1a899d3a-b2a4-487c-b59c-fd2cac4442c8/CAMELS-SPAT"
+        self.CAMELS_SPAT_ROOT = "O:\CAMELS_SPAT"
         self.BASIN_LIST_PATH = "basin_lists/camels_pretraining_basin_list_short.txt"
         self.ROI_DATA_PATH = "FinalData/Dataset4.csv"
-        self.OUTPUT_ROOT_DIR = "Results/set_seq_"
+        self.OUTPUT_ROOT_DIR = "Results/test_1"
         self.PRETRAIN_OUTPUT_DIR = None  # derived if None
 
         # Model
@@ -29,13 +29,25 @@ class Config:
         self.LEARNING_RATE_PRETRAIN = 5e-4
         self.LEARNING_RATE_FINETUNE = 5e-4
         self.TEST_SPLIT_FRACTION = 0.23
-        self.STEPS_PER_EPOCH = 1000
-        self.VAL_STEPS = 200
 
-        # Features
+        # Patience settings
+        self.PATIENCE_PRETRAIN = 10
+        self.PATIENCE_FINETUNE = 15
+        
+        # LR Scheduler settings
+        self.LR_FACTOR = 0.5
+        self.LR_PATIENCE = 5
+
+        # Features & Filtering
         self.SEASONAL_MONTHS = [5, 6, 7, 8, 9]
         self.MONTH_ENCODING = 'sinusoidal'
         self.MONTH_EMB_DIM = 12
+        
+        # Filtering Mode: 'none', 'eval_only', 'finetune', 'all'
+        self.FILTERING_MODE = 'eval_only'
+        
+        # ROI Station Selection: 'all' (zero-fill missing), 'complete_only' (drop incomplete stations)
+        self.ROI_STATION_SELECTION = 'complete_only'
 
         # Reproducibility
         self.SEED = 42
@@ -54,12 +66,29 @@ class Config:
             raise FileNotFoundError(f"Config file not found: {config_file}")
         with open(config_file, 'r') as f:
             config_dict = json.load(f)
+        
+        # Map JSON keys to class attributes (case-insensitive)
         for key, value in config_dict.items():
             attr_name = key.upper()
             if hasattr(self, attr_name):
                 setattr(self, attr_name, value)
             else:
-                print(f"Warning: Unknown config parameter '{key}' in file, ignoring.")
+                # Handle specific mappings for legacy or mismatched keys
+                if key == "pretrain_output_dir":
+                    self.PRETRAIN_OUTPUT_DIR = value
+                elif key == "output_root_dir":
+                    self.OUTPUT_ROOT_DIR = value
+                elif key == "roi_data_path":
+                    self.ROI_DATA_PATH = value
+                elif key == "basin_list_path":
+                    self.BASIN_LIST_PATH = value
+                elif key == "camels_spat_root":
+                    self.CAMELS_SPAT_ROOT = value
+                # Ignore steps_per_epoch / val_steps if present in JSON
+                elif key.lower() in ["steps_per_epoch", "val_steps"]:
+                    pass 
+                else:
+                    print(f"Warning: Unknown config parameter '{key}' in file, ignoring.")
 
     def save_to_file(self, filepath):
         config_dict = self.to_dict()
@@ -87,65 +116,30 @@ class Config:
             'learning_rate_pretrain': self.LEARNING_RATE_PRETRAIN,
             'learning_rate_finetune': self.LEARNING_RATE_FINETUNE,
             'test_split_fraction': self.TEST_SPLIT_FRACTION,
-            'steps_per_epoch': self.STEPS_PER_EPOCH,
-            'val_steps': self.VAL_STEPS,
+            'patience_pretrain': self.PATIENCE_PRETRAIN,
+            'patience_finetune': self.PATIENCE_FINETUNE,
+            'lr_factor': self.LR_FACTOR,
+            'lr_patience': self.LR_PATIENCE,
             'seasonal_months': self.SEASONAL_MONTHS,
             'month_encoding': self.MONTH_ENCODING,
             'month_emb_dim': self.MONTH_EMB_DIM,
+            'filtering_mode': self.FILTERING_MODE,
+            'roi_station_selection': self.ROI_STATION_SELECTION,
             'seed': self.SEED,
         }
 
     @classmethod
     def from_args(cls, args):
-        config = cls(args.config_file) if getattr(args, 'config_file', None) else cls()
+        config = cls(args.config) if hasattr(args, 'config') and args.config else cls()
 
-        if hasattr(args, 'basin_list') and args.basin_list is not None:
-            config.BASIN_LIST_PATH = args.basin_list
-        if hasattr(args, 'roi_data_path') and args.roi_data_path is not None:
-            config.ROI_DATA_PATH = args.roi_data_path
-        if hasattr(args, 'output_dir') and args.output_dir is not None:
-            config.OUTPUT_ROOT_DIR = args.output_dir
-        if hasattr(args, 'pretrain_output_dir') and args.pretrain_output_dir is not None:
-            config.PRETRAIN_OUTPUT_DIR = args.pretrain_output_dir
+        # Override with command line arguments if present
+        if hasattr(args, 'gpu'):
+            # GPU is handled in main, but we can store it if needed
+            pass
+        
+        if hasattr(args, 'filtering_mode') and args.filtering_mode:
+            config.FILTERING_MODE = args.filtering_mode
 
-        if hasattr(args, 'latent_dim') and args.latent_dim is not None:
-            config.LATENT_DIM = args.latent_dim
-        if hasattr(args, 'lstm_units') and args.lstm_units is not None:
-            config.LSTM_UNITS = args.lstm_units
-        if hasattr(args, 'lstm_layers') and args.lstm_layers is not None:
-            config.LSTM_LAYERS = args.lstm_layers
-        if hasattr(args, 'seq_length') and args.seq_length is not None:
-            config.SEQ_LENGTH = args.seq_length
-        if hasattr(args, 'predict_ahead') and args.predict_ahead is not None:
-            config.PREDICT_AHEAD = args.predict_ahead
-        if hasattr(args, 'dropout_rate') and args.dropout_rate is not None:
-            config.DROPOUT_RATE = args.dropout_rate
-
-        if hasattr(args, 'batch_size') and args.batch_size is not None:
-            config.BATCH_SIZE = args.batch_size
-        if hasattr(args, 'epochs_pretrain') and args.epochs_pretrain is not None:
-            config.EPOCHS_PRETRAIN = args.epochs_pretrain
-        if hasattr(args, 'epochs_finetune') and args.epochs_finetune is not None:
-            config.EPOCHS_FINETUNE = args.epochs_finetune
-        if hasattr(args, 'lr_pretrain') and args.lr_pretrain is not None:
-            config.LEARNING_RATE_PRETRAIN = args.lr_pretrain
-        if hasattr(args, 'lr_finetune') and args.lr_finetune is not None:
-            config.LEARNING_RATE_FINETUNE = args.lr_finetune
-        if hasattr(args, 'test_split') and args.test_split is not None:
-            config.TEST_SPLIT_FRACTION = args.test_split
-        if hasattr(args, 'steps_per_epoch') and args.steps_per_epoch is not None:
-            config.STEPS_PER_EPOCH = args.steps_per_epoch
-        if hasattr(args, 'val_steps') and args.val_steps is not None:
-            config.VAL_STEPS = args.val_steps
-
-        if hasattr(args, 'month_encoding') and args.month_encoding is not None:
-            config.MONTH_ENCODING = args.month_encoding
-        if hasattr(args, 'month_emb_dim') and args.month_emb_dim is not None:
-            config.MONTH_EMB_DIM = args.month_emb_dim
-        if hasattr(args, 'seed') and args.seed is not None:
-            config.SEED = args.seed
-
-        config._finalize_paths()
         return config
 
     def print_config(self):
@@ -172,12 +166,16 @@ class Config:
         print(f"  LR Pretrain      : {self.LEARNING_RATE_PRETRAIN}")
         print(f"  LR Finetune      : {self.LEARNING_RATE_FINETUNE}")
         print(f"  Test Split       : {self.TEST_SPLIT_FRACTION:.2f}")
-        print(f"  Steps/Epoch      : {self.STEPS_PER_EPOCH}")
-        print(f"  Val Steps        : {self.VAL_STEPS}")
-        print("FEATURES:")
+        print(f"  Patience Pretrain: {self.PATIENCE_PRETRAIN}")
+        print(f"  Patience Finetune: {self.PATIENCE_FINETUNE}")
+        print(f"  LR Factor        : {self.LR_FACTOR}")
+        print(f"  LR Patience      : {self.LR_PATIENCE}")
+        print("FEATURES & FILTERING:")
         print(f"  Seasonal Months  : {self.SEASONAL_MONTHS}")
         print(f"  Month Encoding   : {self.MONTH_ENCODING}")
         print(f"  Month Emb Dim    : {self.MONTH_EMB_DIM}")
+        print(f"  Filtering Mode   : {self.FILTERING_MODE}")
+        print(f"  ROI Station Sel  : {self.ROI_STATION_SELECTION}")
         print(f"SEED: {self.SEED}")
         print(f"{'='*70}\n")
 
@@ -191,7 +189,7 @@ class Config:
             errors.append("TEST_SPLIT_FRACTION must be between 0 and 1")
         if not 0 <= self.DROPOUT_RATE < 1:
             errors.append("DROPOUT_RATE must be between 0 and 1")
-        for name in ['LATENT_DIM', 'LSTM_UNITS', 'LSTM_LAYERS', 'BATCH_SIZE', 'EPOCHS_PRETRAIN', 'EPOCHS_FINETUNE', 'STEPS_PER_EPOCH', 'VAL_STEPS']:
+        for name in ['LATENT_DIM', 'LSTM_UNITS', 'LSTM_LAYERS', 'BATCH_SIZE', 'EPOCHS_PRETRAIN', 'EPOCHS_FINETUNE']:
             if getattr(self, name) <= 0:
                 errors.append(f"{name} must be positive")
         for name in ['LEARNING_RATE_PRETRAIN', 'LEARNING_RATE_FINETUNE']:
@@ -199,6 +197,15 @@ class Config:
                 errors.append(f"{name} must be positive")
         if self.MONTH_ENCODING == 'sinusoidal' and self.MONTH_EMB_DIM % 2 != 0:
             errors.append("MONTH_EMB_DIM must be even for sinusoidal encoding")
+        
+        valid_modes = ['none', 'eval_only', 'finetune', 'all']
+        if self.FILTERING_MODE not in valid_modes:
+            errors.append(f"FILTERING_MODE must be one of {valid_modes}")
+            
+        valid_roi_sel = ['all', 'complete_only']
+        if self.ROI_STATION_SELECTION not in valid_roi_sel:
+            errors.append(f"ROI_STATION_SELECTION must be one of {valid_roi_sel}")
+
         if errors:
             raise ValueError("Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors))
         print("✅ Configuration validation passed")

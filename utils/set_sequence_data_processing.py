@@ -2,13 +2,14 @@ import numpy as np
 
 
 def create_sequences(X, X_global, y, seq_length, predict_ahead, include_flow_history=False, flow_history_lag_gap=0,
-                     forecast_horizon=1):
+                     forecast_horizon=1, months=None):
     """
     Creates sequences for LSTM training.
     Robust to input dimensionality (works for 2D or 3D X).
     """
     Xs = []
     ys = []
+    ms = []
 
     # Calculate effective length
     total_samples = len(X)
@@ -49,7 +50,14 @@ def create_sequences(X, X_global, y, seq_length, predict_ahead, include_flow_his
             if target_idx + forecast_horizon > total_samples:
                 break
             ys.append(y[target_idx: target_idx + forecast_horizon].flatten())
+            
+        # Extract month for the target step
+        if months is not None:
+            ms.append(months[target_idx])
 
+    if months is not None:
+        return np.array(Xs), np.array(ys), np.array(ms)
+    
     return np.array(Xs), np.array(ys)
 
 
@@ -75,19 +83,22 @@ def create_sequences_per_basin(X_list, M_list, y_list, basin_lengths, seq_length
 
         for X_basin, y_basin, months_basin in zip(X_list, y_list, iter_months):
             # Pass dummy global for now as set-sequence handles globals differently or integrated
-            X_seq, y_seq = create_sequences(X_basin, None, y_basin, seq_length, predict_ahead,
-                                            include_flow_history, flow_history_lag_gap, forecast_horizon)
+            result = create_sequences(X_basin, None, y_basin, seq_length, predict_ahead,
+                                            include_flow_history, flow_history_lag_gap, forecast_horizon, months=months_basin)
+            
+            if months_basin is not None:
+                X_seq, y_seq, m_seq = result
+                all_months.append(m_seq)
+            else:
+                X_seq, y_seq = result
+                
             all_Xs.append(X_seq)
             all_ys.append(y_seq)
 
-            if months_basin is not None:
-                # Handle month tracking logic similar to V1/V2 if needed
-                # (omitted for brevity unless strictly required for filtering)
-                pass
 
         # Note: We cannot vstack all_Xs if they have different Grid sizes (Set-Sequence case).
         # We return the LIST of sequences if grid sizes differ.
-        return all_Xs, all_ys, None
+        return all_Xs, all_ys, all_months if months_list is not None else None
     else:
         # Standard V1/V2 flattened behavior
         # (This block assumes X_list is a single big array)

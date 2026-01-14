@@ -1,92 +1,25 @@
 {
-  "paths": {
-    "camels_spat_root": "/media/sbhuiya/1a899d3a-b2a4-487c-b59c-fd2cac4442c8/CAMELS-SPAT",
-    "basin_list_path": "readmes/camels_pretraining_basin_list_short.txt",
-    "roi_data_path": "FinalData/Dataset4.csv",
-    "pretrain_output_dir": "config_unified_test_res",
-    "finetune_output_dir": "config_unified_test_res",
-    "latents_save_dir": null,
-    "latents_load_path": null
-  },
-  "toggles": {
-    "save_latents": true,
-    "load_latents": false,
-    "use_shared_autoencoder": false,
-    "use_model_v2": false,
-    "use_temporal_attention": true,
-    "include_flow_history": true,
-    "eval_filtered": false,
-    "reuse_pretrain_scalers": false
-  },
-  "model": {
-    "latent_dim": 256,
-    "lstm_units": 256,
-    "lstm_layers": 2,
-    "gru_units": 64,
-    "gru_layers": 1,
-    "dropout_rate": 0.23,
-    "num_attention_heads": 4,
-    "attention_key_dim": 32,
-    "attention_pooling": "average"
-  },
-  "data": {
-    "seq_length": 12,
-    "predict_ahead": 1,
-    "flow_history_lag_gap": 0,
-    "gap_fill_method": "forward_fill",
-    "seasonal_months": [3, 4, 5, 6, 7, 8, 9],
-    "month_encoding": "sinusoidal",
-    "month_emb_dim": 12,
-    "test_split_fraction": 0.23,
-    "scaler_type": "minmax",
-    "minmax_feature_range": [0, 1],
-    "minmax_clip": false
-  },
-  "augmentation": {
-    "use_data_augmentation": false,
-    "aug_factor": 1,
-    "aug_on_pretrain": false,
-    "aug_on_finetune": false
-  },
-  "neural_ode": {
-    "use_neural_ode": true,
-    "ode_hidden_dim": 128,
-    "ode_function_type": "softplus",
-    "ode_n_steps": 100,
-    "ode_lamda": [1.0, 0.5, 0.5],
-    "ode_learning_rate": 0.0001,
-    "ode_epochs": 200
-  },
-  "training": {
-    "pipeline_version": "all",
-    "seed": 42,
-    "batch_size": 1024,
-    "epochs_ae": 200,
-    "epochs_pretrain": 300,
-    "epochs_finetune": 250,
-    "ae_epochs_per_basin": 200,
-    "ae_patience": 20,
-    "learning_rate_ae": 0.0005,
-    "learning_rate_pretrain": 0.0005,
-    "learning_rate_finetune": 0.0005
-  },
-  "normalization": {
-    "type_ae": "batch",
-    "type_lstm": "layer",
-    "type_fusion": "layer"
-  },
-  "loss": {
-    "ae": "mse",
-    "pretrain": "mse",
-    "finetune": "mse",
-    "nse_epsilon": 1e-6,
-    "combined_loss_alpha": 0.5
-  },
-  "schedule": {
-    "1": {"epochs": 150, "lr_factor": 1.0},
-    "2": {"epochs": 155, "lr_factor": 0.8},
-    "3": {"epochs": 170, "lr_factor": 0.5},
-    "4": {"epochs": 100, "lr_factor": 0.5},
-    "5": {"epochs": 150, "lr_factor": 0.3}
-  }
+  "camels_spat_root": "/media/sbhuiya/1a899d3a-b2a4-487c-b59c-fd2cac4442c8/CAMELS-SPAT",
+  "basin_list_path": "readmes/camels_pretraining_basin_list_short.txt",
+  "roi_data_path": "FinalData/Dataset4.csv",
+  "output_root_dir": "config_unified_test_res",
+  "pretrain_output_dir": "config_unified_test_res",
+  "latent_dim": 256,
+  "lstm_units": 256,
+  "lstm_layers": 2,
+  "seq_length": 12,
+  "predict_ahead": 1,
+  "dropout_rate": 0.23,
+  "batch_size": 1024,
+  "epochs_pretrain": 300,
+  "epochs_finetune": 250,
+  "learning_rate_pretrain": 0.0005,
+  "learning_rate_finetune": 0.0005,
+  "test_split_fraction": 0.23,
+  "steps_per_epoch": 100,
+  "val_steps": 20,
+  "seasonal_months": [3, 4, 5, 6, 7, 8, 9],
+  "month_encoding": "sinusoidal",
+  "month_emb_dim": 12,
+  "seed": 42
 }

@@ -23,8 +23,6 @@ def get_basin_scale(basin_id, camels_root):
     meso_path = Path(camels_root) / "observations" / "meso-scale" / "obs-daily" / f"{basin_id}_daily_flow_observations.nc"
     macro_path = Path(camels_root) / "observations" / "macro-scale" / "obs-daily" / f"{basin_id}_daily_flow_observations.nc"
 
-    print(meso_path)
-    print(macro_path)
 
     if meso_path.exists():
         return "meso-scale"
@@ -42,20 +40,18 @@ def process_netcdf_basin(basin_id, camels_root, apply_seasonal_filter=False, tar
     - If False: Stacks grid into (Time, Grid, Feat) (for Set-Sequence).
     """
     try:
-        print("Entering process_netcdf_basin with basin id ", basin_id)
+        #print("Entering process_netcdf_basin with basin id ", basin_id)
         scale = get_basin_scale(basin_id, camels_root)
 
 
-        print("Basin Scale found", scale)
+        #print("Basin Scale found", scale)
         if scale is None:
             return None, None, None, None
 
         forcing_path = Path(camels_root) / "daymet-distributed" / f"{basin_id}_daymet_distributed.nc"
         flow_path = Path(camels_root) / "observations" / scale / "obs-daily" / f"{basin_id}_daily_flow_observations.nc"
 
-        print("Paths found")
-        print(forcing_path)
-        print(flow_path)
+
 
         if not forcing_path.exists() or not flow_path.exists():
             return None, None, None, None
@@ -64,7 +60,7 @@ def process_netcdf_basin(basin_id, camels_root, apply_seasonal_filter=False, tar
         flow_ds = xr.open_dataset(flow_path)
         forcing_ds['tavg'] = (forcing_ds['tmin'] + forcing_ds['tmax']) / 2
 
-        print("Datasets opened")
+
 
         if not forcing_ds.data_vars:
             print(f"No data variables found in {forcing_path}")
@@ -193,7 +189,7 @@ def load_all_pretrain_basins(basin_list, camels_root, apply_seasonal_filter=Fals
 
 def process_roi_csv(csv_path, apply_seasonal_filter=False, target_months=None, config=None, flatten_spatial=True):
     """
-    MODIFIED: Handles ROI CSVs.
+    MODIFIED: Handles ROI CSVs with optional station filtering.
     Parses columns to extract stations and creates a spatial 'Set' structure.
     Returns X as (Time, Grid, 4) where 4 = [prcp, tmin, tmax, tavg].
     """
@@ -223,24 +219,51 @@ def process_roi_csv(csv_path, apply_seasonal_filter=False, target_months=None, c
                 stations.add(col[:-len(suffix)])
     
     stations = sorted(list(stations))
-    print(f"Identified {len(stations)} stations in ROI: {stations}")
+    print(f"Identified {len(stations)} potential stations in ROI: {stations}")
     
     if not stations:
         raise ValueError("No stations identified in ROI CSV! Check column suffixes.")
 
+    # --- STATION FILTERING LOGIC ---
+    roi_selection_mode = getattr(config, 'ROI_STATION_SELECTION', 'all')
+    
+    final_stations = []
+    if roi_selection_mode == 'complete_only':
+        print("Filtering for COMPLETE stations only (must have all 4 variables)...")
+        for station in stations:
+            has_all = True
+            for var_key in ['prcp', 'tmin', 'tmax', 'tavg']:
+                col_name = f"{station}{var_map[var_key]}"
+                if col_name not in df.columns:
+                    has_all = False
+                    break
+            if has_all:
+                final_stations.append(station)
+            else:
+                print(f"  - Dropping incomplete station: {station}")
+    else:
+        print("Using ALL stations (zero-filling missing variables)...")
+        final_stations = stations
+
+    if not final_stations:
+        raise ValueError("No valid stations found after filtering! Check your CSV or config.")
+
+    print(f"Final Station List ({len(final_stations)}): {final_stations}")
+
     # 2. Build 3D Tensor (Time, Stations, 4)
     n_time = len(df)
-    n_stations = len(stations)
+    n_stations = len(final_stations)
     n_features = 4  # Fixed to [prcp, tmin, tmax, tavg]
     
     X_spatial = np.zeros((n_time, n_stations, n_features), dtype=np.float32)
     
-    for i, station in enumerate(stations):
+    for i, station in enumerate(final_stations):
         for j, var_key in enumerate(['prcp', 'tmin', 'tmax', 'tavg']):
             suffix = var_map[var_key]
             col_name = f"{station}{suffix}"
             if col_name in df.columns:
                 X_spatial[:, i, j] = df[col_name].values
+            # else: remains 0.0 (only happens in 'all' mode)
 
     if flatten_spatial:
         X_processed = X_spatial.reshape(n_time, -1)

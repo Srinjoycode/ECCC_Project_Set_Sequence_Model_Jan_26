@@ -2,45 +2,24 @@
   "camels_spat_root": "/media/sbhuiya/1a899d3a-b2a4-487c-b59c-fd2cac4442c8/CAMELS-SPAT",
   "basin_list_path": "readmes/camels_pretraining_basin_list_short.txt",
   "roi_data_path": "FinalData/Dataset4.csv",
-
+  "output_root_dir": "RESULTS/experiment_combined_loss/finetuning/",
+  "pretrain_output_dir": "RESULTS/experiment_combined_loss/pretraining/",
   "latent_dim": 128,
   "lstm_units": 128,
   "lstm_layers": 2,
   "seq_length": 12,
   "predict_ahead": 1,
   "dropout_rate": 0.3,
-
   "batch_size": 1024,
-  "epochs_ae": 100,
   "epochs_pretrain": 100,
   "epochs_finetune": 200,
-  "learning_rate_ae": 0.0001,
   "learning_rate_pretrain": 0.0001,
   "learning_rate_finetune": 0.00005,
   "test_split_fraction": 0.23,
-
+  "steps_per_epoch": 100,
+  "val_steps": 20,
   "seasonal_months": [5, 6, 7, 8, 9],
   "month_encoding": "sinusoidal",
   "month_emb_dim": 12,
-  "include_flow_history": true,
-
-  "loss_function": "combined",
-  "nse_epsilon": 1e-06,
-  "combined_loss_alpha": 0.5,
-
-  "pretrain_output_dir": "RESULTS/experiment_combined_loss/pretraining/",
-  "finetune_output_dir": "RESULTS/experiment_combined_loss/finetuning/",
-
-  "pipeline_version": "v3",
-  "eval_filtered": false,
-  "seed": 42,
-
-  "multistage_schedule": {
-    "1": {"epochs": 50, "lr_factor": 1.0},
-    "2": {"epochs": 55, "lr_factor": 0.8},
-    "3": {"epochs": 70, "lr_factor": 0.5},
-    "4": {"epochs": 80, "lr_factor": 0.2},
-    "5": {"epochs": 50, "lr_factor": 0.05}
-  }
+  "seed": 42
 }
-
